@@ -36,8 +36,9 @@ jobs:
 
   # -------------------------------------------------------------------
   # 2. CD: выкладка на VPS (только push в main, после успешного CI)
-  #    Деплой через rsync: на сервере НЕ нужен git-репозиторий,
-  #    файлы просто заливаются поверх /opt/netwatch, затем рестарт.
+  #    Код заливается через scp-action (не rsync — его нет/капризен),
+  #    затем ssh-action пересобирает и перезапускает сервисы.
+  #    На сервере НЕ нужен git-репозиторий.
   # -------------------------------------------------------------------
   deploy:
     needs: ci
@@ -46,27 +47,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Подготовить SSH-ключ
-        run: |
-          mkdir -p ~/.ssh
-          # пишем ключ через printf, чтобы гарантированно добавить \n в конец
-          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          # отключаем проверку host key (rsync идёт с -o StrictHostKeyChecking=accept-new)
-          echo "Host *" > ~/.ssh/config
-          echo "  StrictHostKeyChecking accept-new" >> ~/.ssh/config
-          chmod 600 ~/.ssh/config
-
-      - name: Залить код на VPS (rsync)
-        run: |
-          rsync -az --delete \
-            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
-            --exclude='.git' \
-            --exclude='logs' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            ./ \
-            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/netwatch/
+      - name: Залить код на VPS (scp)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # заливаем всё, кроме того, что не должно попасть на прод
+          source: "app.py,tracer.sh,Dockerfile,docker-compose.yml,bt,README.md"
+          target: "/opt/netwatch/"
+          overwrite: true
+          # не удаляем ничего лишнего: logs/ и образ остаются на месте
 
       - name: Пересобрать и перезапустить на VPS
         uses: appleboy/ssh-action@v1.2.0
