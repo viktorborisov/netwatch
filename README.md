@@ -90,9 +90,9 @@ Workflow: `.github/workflows/deploy.yml`
 
    | Секрет       | Значение                                             |
    |--------------|------------------------------------------------------|
-   | `VPS_HOST`   | `194.87.239.102`                                     |
-   | `VPS_USER`   | `root`                                               |
-   | `VPS_SSH_KEY`| приватный ключ `~/.ssh/gh_deploy` (целиком, с строками) |
+   | `VM_HOST`   | `194.87.239.102`                                     |
+   | `VM_USER`   | `root`                                               |
+   | `VM_SSH_KEY`| приватный ключ `~/.ssh/gh_deploy` (целиком, с строками) |
 
 3. Публичная часть ключа уже в `~/.ssh/authorized_keys` на VPS
    (запись `github-actions-deploy`). Если нет — добавь:

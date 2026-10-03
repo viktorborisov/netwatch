@@ -10,9 +10,9 @@ on:
     branches: [main]
 
 # Секреты (GitHub repo -> Settings -> Secrets and variables -> Actions):
-#   VPS_HOST     — 194.87.239.102
-#   VPS_USER     — root (или отдельный deploy-пользователь)
-#   VPS_SSH_KEY  — приватный SSH-ключ; его публичная часть должна быть
+#   VM_HOST     — 194.87.239.102
+#   VM_USER     — root (или отдельный deploy-пользователь)
+#   VM_SSH_KEY  — приватный SSH-ключ; его публичная часть должна быть
 #                  в ~/.ssh/authorized_keys на VPS.
 #                  (у нас там уже есть github-actions-deploy)
 
@@ -50,9 +50,9 @@ jobs:
       - name: Залить код на VPS (scp)
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
           # заливаем всё, кроме того, что не должно попасть на прод
           source: "app.py,tracer.sh,Dockerfile,docker-compose.yml,bt,README.md"
           target: "/opt/netwatch/"
@@ -62,9 +62,9 @@ jobs:
       - name: Пересобрать и перезапустить на VPS
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
           script: |
             set -e
             cd /opt/netwatch
