@@ -1,0 +1,84 @@
+name: CI + Deploy
+
+# Когда запускать:
+#   - push в main        -> проверить и задеплоить на VPS
+#   - pull_request       -> только проверка (без деплоя)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Секреты (GitHub repo -> Settings -> Secrets and variables -> Actions):
+#   VPS_HOST     — 194.87.239.102
+#   VPS_USER     — root (или отдельный deploy-пользователь)
+#   VPS_SSH_KEY  — приватный SSH-ключ; его публичная часть должна быть
+#                  в ~/.ssh/authorized_keys на VPS.
+#                  (у нас там уже есть github-actions-deploy)
+
+jobs:
+  # -------------------------------------------------------------------
+  # 1. CI: быстрые проверки перед выкладкой
+  # -------------------------------------------------------------------
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Проверить Python-синтаксис app.py
+        run: python3 -m py_compile app.py
+
+      - name: Проверить bash-синтаксис tracer.sh
+        run: bash -n tracer.sh
+
+      - name: Проверить, что Dockerfile собирается
+        run: docker build -t netwatch:ci .
+
+  # -------------------------------------------------------------------
+  # 2. CD: выкладка на VPS (только push в main, после успешного CI)
+  #    Деплой через rsync: на сервере НЕ нужен git-репозиторий,
+  #    файлы просто заливаются поверх /opt/netwatch, затем рестарт.
+  # -------------------------------------------------------------------
+  deploy:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Подготовить SSH-ключ
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # чтобы ssh/rsync не спрашивали подтверждения отпечатка хоста
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Залить код на VPS (rsync)
+        run: |
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            --exclude='.git' \
+            --exclude='logs' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            ./ \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/netwatch/
+
+      - name: Пересобрать и перезапустить на VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/netwatch
+            # пересобираем и перезапускаем веб-контейнер
+            docker compose build netwatch
+            docker compose up -d netwatch
+            # host-трейсер перезапускаем, чтобы перечитать all.bt
+            systemctl restart netwatch-tracer
+            # чистим старые слои образов, чтобы не забить диск
+            docker image prune -f
+            echo "deploy done: $(date -u)"

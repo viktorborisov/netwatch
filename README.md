@@ -68,3 +68,47 @@ Flask слушает ТОЛЬКО 127.0.0.1:8000. Смотри через SSH-т
 - Алерт в Telegram на коннект к «интересному» IP/порту (probe + pipe).
 - FIFO вместо JSONL (append дешевле, tail проще).
 - Ротация events.jsonl (logrotate) при долгой работе.
+
+## CI/CD (GitHub Actions)
+
+Workflow: `.github/workflows/deploy.yml`
+
+- **pull_request** → только CI (проверка кода, сборка образа).
+- **push в main** → CI + деплой на VPS по rsync, затем рестарт
+  контейнера и host-трейсера. На сервере git-репозиторий НЕ нужен.
+
+### Настройка (один раз)
+
+1. Создай репозиторий на GitHub и запушь:
+
+       cd netwatch
+       git remote add origin git@github.com:<user>/netwatch.git
+       git push -u origin main
+
+2. Добавь секреты: GitHub repo → Settings → Secrets and variables →
+   Actions → New repository secret:
+
+   | Секрет       | Значение                                             |
+   |--------------|------------------------------------------------------|
+   | `VPS_HOST`   | `194.87.239.102`                                     |
+   | `VPS_USER`   | `root`                                               |
+   | `VPS_SSH_KEY`| приватный ключ `~/.ssh/gh_deploy` (целиком, с строками) |
+
+3. Публичная часть ключа уже в `~/.ssh/authorized_keys` на VPS
+   (запись `github-actions-deploy`). Если нет — добавь:
+
+       ssh-copy-id -i ~/.ssh/gh_deploy.pub root@194.87.239.102
+
+4. Проверка: сделай push в main → во вкладке Actions увидишь
+   jobs `ci` и `deploy`.
+
+### Как это работает
+
+    push main --> [ci: py_compile, bash -n, docker build]
+                          |
+                          v (needs: ci)
+                 [deploy: rsync код -> VPS, docker compose build/up,
+                          systemctl restart netwatch-tracer]
+
+`--delete` в rsync убирает удалённые локально файлы, но исключает
+`.git`, `logs`, `__pycache__` — логи на сервере не трогаются.
