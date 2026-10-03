@@ -10,8 +10,11 @@ services:
       - ./logs:/data:ro          # события от host-bpftrace
     environment:
       EVENTS_FILE: /data/events.jsonl
+      IPDB_PATH: /app/ipdb.bin
       RING_SIZE: "1000"
       RECENT_N: "200"
-    mem_limit: 128m
-    memswap_limit: 192m
+    # ipdb.bin держит ~25-35MB в памяти (array start/end/idx для 2.56M
+    # диапазонов). Даём запас: 192M ram + swap.
+    mem_limit: 192m
+    memswap_limit: 256m
     cpus: "0.5"

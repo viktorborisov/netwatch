@@ -17,14 +17,38 @@ Linux сообщает о событиях, без патчей и переза�
   не нужно монтировать /sys/kernel внутрь, легче и безопаснее.
 - **один bpftrace, а не три** — каждый инстанс держит ~112MB RSS
   (libbpf/LLVM). Три инстанса = OOM на этом 868MB VPS. Один = ~40-60MB.
-- **Flask в контейнере** — изоляция, лимит памяти 128M, рестарт-политика.
+- **Flask в контейнере** — изоляция, лимит памяти 192M, рестарт-политика.
+
+## Карта мира коннектов
+
+На дашборде слева — карта, где линии тянутся от сервера (RU) к
+странам, куда идут исходящие соединения. Гео определяется офлайн по
+компактной базе `ipdb.bin`.
+
+- `tools/build_ipdb.py` — конвертер GeoLite2 city CSV -> `ipdb.bin`.
+  Агрегирует диапазоны по стране и берёт моду координат (крупнейший
+  город) + взвешивание по ширине сети. Два прохода, чтобы не съесть
+  память (наивный подход = OOM на 868MB: 2.5M кортежей ~466MB RSS).
+- `ipdb.py` — загрузчик: `array('I')` для start/end, `array('H')` для
+  индекса страны, бинарный поиск. ~25MB в памяти на 2.56M диапазонов.
+- `ipdb.bin` — готовая база (~25MB), лежит в репозитории и в образе.
+
+### Как пересобрать ipdb.bin
+
+    npm pack @ip-location-db/geolite2-city      # ~118MB tarball
+    tar xzf ip-location-db-geolite2-city-*.tgz
+    python3 tools/build_ipdb.py \
+      package/geolite2-city-ipv4-num.csv.gz ipdb.bin
 
 ## Файлы
 
 - `bt/all.bt`      — bpftrace-программа: 3 tracepointа (net/proc/file)
 - `tracer.sh`      — запускает all.bt, превращает строки в JSONL
-- `app.py`         — Flask: tail JSONL, ring-buffer, SSE-стрим, дашборд
-- `Dockerfile`     — образ Flask-сервиса
+- `app.py`         — Flask: tail JSONL, ring-buffer, SSE, дашборд, карта
+- `ipdb.py`        — компактная база IP->страна+координаты (поиск)
+- `ipdb.bin`       — сама база (генерируется `tools/build_ipdb.py`)
+- `tools/build_ipdb.py` — сборка ipdb.bin из GeoLite2 CSV
+- `Dockerfile`     — образ Flask-сервиса (+ ipdb.py, ipdb.bin)
 - `docker-compose.yml` — запуск контейнера, volume logs->/data:ro
 - `/etc/systemd/system/netwatch-tracer.service` — автозапуск tracerа
 

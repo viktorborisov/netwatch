@@ -54,7 +54,7 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           # заливаем всё, кроме того, что не должно попасть на прод
-          source: "app.py,tracer.sh,Dockerfile,docker-compose.yml,bt,README.md"
+          source: "app.py,ipdb.py,ipdb.bin,tracer.sh,Dockerfile,docker-compose.yml,bt,README.md"
           target: "/opt/netwatch/"
           overwrite: true
           # не удаляем ничего лишнего: logs/ и образ остаются на месте

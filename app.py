@@ -16,10 +16,16 @@ import json
 import os
 import time
 import threading
-from collections import deque
+from collections import deque, Counter
 from flask import Flask, Response, jsonify, render_template_string
 
+try:
+    from ipdb import IPDB
+except ImportError:
+    IPDB = None
+
 EVENTS = os.environ.get("EVENTS_FILE", "/data/events.jsonl")
+IPDB_PATH = os.environ.get("IPDB_PATH", "/app/ipdb.bin")
 MAXLEN = int(os.environ.get("RING_SIZE", "1000"))
 
 app = Flask(__name__)
@@ -29,6 +35,22 @@ _buf = deque(maxlen=MAXLEN)
 _counts = {"net": 0, "proc": 0, "file": 0}
 _lock = threading.Lock()
 _subscribers = []  # список очередей (deque) для SSE
+
+# гео-база IP->страна+координаты (ленивая загрузка, ~25MB)
+_geo = None
+_geo_lock = threading.Lock()
+
+# статистика коннектов по странам: cc -> {cc, lat, lon, count}
+_cc_stats = {}
+
+
+def geo():
+    global _geo
+    if _geo is None and IPDB is not None and os.path.exists(IPDB_PATH):
+        with _geo_lock:
+            if _geo is None:
+                _geo = IPDB(IPDB_PATH)
+    return _geo
 
 # Время загрузки системы: realtime - uptime. Нужно, чтобы перевести
 # kernel nsecs в человеческое время. Считаем один раз при старте.
@@ -54,7 +76,16 @@ def enrich(ev):
     t = ev.get("type")
     d = ev.get("data") or {}
     if t == "net":
-        ev["desc"] = "%s:%s" % (d.get("daddr"), d.get("dport"))
+        daddr = d.get("daddr", "")
+        ev["desc"] = "%s:%s" % (daddr, d.get("dport"))
+        # определяем страну/координаты удалённого IP
+        g = geo()
+        if g is not None:
+            loc = g.lookup(daddr)
+            if loc:
+                d["cc"] = loc["cc"]
+                d["lat"] = loc["lat"]
+                d["lon"] = loc["lon"]
     elif t == "proc":
         ev["desc"] = d.get("file", "")
     elif t == "file":
@@ -92,6 +123,16 @@ def tail_loop():
                 _buf.append(ev)
                 if ev["type"] in _counts:
                     _counts[ev["type"]] += 1
+                # копим статистику коннектов по странам (для карты)
+                if ev["type"] == "net" and ev.get("data", {}).get("cc"):
+                    d = ev["data"]
+                    key = d["cc"]
+                    g = _cc_stats.get(key)
+                    if g is None:
+                        _cc_stats[key] = {"cc": key, "lat": d.get("lat"),
+                                          "lon": d.get("lon"), "count": 1}
+                    else:
+                        g["count"] += 1
                 subs = list(_subscribers)
             for q in subs:
                 q.append(ev)
@@ -111,6 +152,27 @@ def api_recent():
         evs = list(_buf)[-n:]
         counts = dict(_counts)
     return jsonify({"counts": counts, "events": evs})
+
+
+@app.route("/api/geo")
+def api_geo():
+    """Сводка коннектов по странам: для карты мира."""
+    with _lock:
+        stats = sorted(_cc_stats.values(), key=lambda x: -x["count"])[:40]
+        # точки последних net-событий с координатами
+        points = []
+        for ev in list(_buf):
+            if ev["type"] == "net":
+                d = ev.get("data") or {}
+                if d.get("lat") is not None:
+                    points.append({
+                        "lat": d["lat"], "lon": d["lon"],
+                        "cc": d.get("cc"), "daddr": d.get("daddr"),
+                        "dport": d.get("dport"), "comm": ev.get("comm"),
+                        "wall_ts": ev.get("wall_ts"),
+                    })
+        points = points[-80:]
+    return jsonify({"countries": stats, "points": points})
 
 
 @app.route("/events")
@@ -167,7 +229,17 @@ INDEX_HTML = r"""
   .dot { width:8px;height:8px;border-radius:50%;background:#37d67a;
          display:inline-block; animation:pulse 1.4s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
-  main { display:grid; grid-template-columns:1fr; height:calc(100vh - 52px); }
+  main { display:grid; grid-template-columns:minmax(340px,42%) 1fr;
+         height:calc(100vh - 52px); }
+  @media (max-width:820px){ main { grid-template-columns:1fr;
+         grid-template-rows:40vh 1fr; } }
+  .mapbox { border-right:1px solid var(--line); position:relative;
+            overflow:hidden; background:#070b10; }
+  #map { width:100%; height:100%; display:block; }
+  .maplegend { position:absolute; left:10px; bottom:10px; font-size:11px;
+               color:#7f93a8; background:rgba(11,15,20,.7); padding:6px 8px;
+               border:1px solid var(--line); border-radius:6px; }
+  .maplegend b { color:#4cc9f0; }
   table { border-collapse:collapse; width:100%; }
   thead th { position:sticky; top:0; background:var(--panel);
              text-align:left; padding:7px 12px; border-bottom:1px solid var(--line);
@@ -192,13 +264,20 @@ INDEX_HTML = r"""
   <span class="pill p">proc <b id="c-proc">0</b></span>
   <span class="pill f">file <b id="c-file">0</b></span>
 </header>
-<main class="wrap">
+<main>
+  <div class="mapbox">
+    <canvas id="map"></canvas>
+    <div class="maplegend">карта коннектов · <b>линия</b> = куда стучится сервер ·
+      точка-хаб = <b>RU</b> (сервер)</div>
+  </div>
+  <div class="wrap">
   <table>
     <thead><tr><th style="width:110px">time</th>
       <th style="width:70px">type</th><th style="width:70px">pid</th>
       <th style="width:140px">comm</th><th>detail</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
+  </div>
 </main>
 <script>
 const MAX = 300;
@@ -251,8 +330,120 @@ es.onmessage = (m)=>{
   if(m.data === "") return;
   const ev = JSON.parse(m.data);
   addRow(ev);
+  if(ev.type === "net" && ev.data && ev.data.lat != null){
+    addMapPoint(ev);
+  }
 };
 es.onerror = ()=>{ /* EventSource сам переподключится */ };
+
+// ------------------------------------------------------------------
+// Карта мира на canvas: эквидистантная проекция lat/lon -> x/y.
+// Контуры материков — упрощённые полигоны (inline, без CDN).
+// Линии тянутся от хаба (координаты сервера) к целям коннектов.
+// ------------------------------------------------------------------
+const map = document.getElementById("map");
+const ctx = map.getContext("2d");
+const HUB = { lat:55.7, lon:37.6 };   // Москва (наш VPS, RU)
+
+// грубые контуры континентов (lon,lat пары), чтобы был ориентир
+const LAND = [
+  [[-168,66],[-140,70],[-100,72],[-80,70],[-60,58],[-70,45],[-80,25],[-97,17],[-105,20],[-118,32],[-127,40],[-125,50],[-140,60],[-168,66]], // N.America
+  [[-80,10],[-65,12],[-50,0],[-35,-8],[-40,-22],[-55,-35],[-70,-52],[-75,-45],[-72,-18],[-80,-5],[-80,10]], // S.America
+  [[-10,36],[0,44],[10,45],[28,45],[40,42],[50,45],[60,42],[70,38],[80,30],[90,22],[100,15],[110,10],[120,22],[130,32],[140,45],[160,60],[180,66],[160,70],[140,72],[100,76],[60,72],[30,70],[10,60],[-10,58],[-10,36]], // Eurasia
+  [[-17,15],[10,20],[30,15],[50,12],[42,-2],[40,-18],[32,-28],[20,-35],[10,-35],[0,-30],[-10,-10],[-17,15]], // Africa
+  [[113,-22],[125,-15],[140,-12],[150,-22],[153,-32],[146,-40],[135,-35],[120,-34],[113,-22]], // Australia
+  [[-45,60],[-20,66],[-25,75],[-40,82],[-60,80],[-50,70],[-45,60]] // Greenland-ish
+];
+
+let W=0, H=0, DPR=1;
+function resize(){
+  DPR = window.devicePixelRatio || 1;
+  const r = map.getBoundingClientRect();
+  W = r.width; H = r.height;
+  map.width = W*DPR; map.height = H*DPR;
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  drawMap();
+}
+window.addEventListener("resize", resize);
+
+// lon/lat -> экранные координаты
+function proj(lon, lat){
+  const x = (lon + 180) / 360 * W;
+  const y = (90 - lat) / 180 * H;
+  return [x, y];
+}
+
+// активные коннекты для анимации (гаснут со временем)
+let arcs = [];   // {lat,lon,t}
+function addMapPoint(ev){
+  const d = ev.data;
+  arcs.push({ lat:d.lat, lon:d.lon, t:performance.now(), daddr:d.daddr });
+  if(arcs.length > 60) arcs.shift();
+}
+
+function drawMap(){
+  if(!W) return;
+  // фон
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = "#070b10"; ctx.fillRect(0,0,W,H);
+  // сетка
+  ctx.strokeStyle = "#12202e"; ctx.lineWidth = 1;
+  for(let lon=-180; lon<=180; lon+=30){
+    const [x] = proj(lon,0); ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+  }
+  for(let lat=-60; lat<=60; lat+=30){
+    const [,y] = proj(0,lat); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  }
+  // материки
+  ctx.fillStyle = "#101c28"; ctx.strokeStyle = "#1e3346"; ctx.lineWidth = 1;
+  for(const poly of LAND){
+    ctx.beginPath();
+    poly.forEach(([lon,lat],i)=>{
+      const [x,y] = proj(lon,lat);
+      i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+    });
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  // хаб (сервер)
+  const [hx,hy] = proj(HUB.lon, HUB.lat);
+  // линии коннектов
+  const now = performance.now();
+  arcs = arcs.filter(a => now - a.t < 6000);
+  for(const a of arcs){
+    const [x,y] = proj(a.lon, a.lat);
+    const age = (now - a.t) / 6000;
+    ctx.strokeStyle = `rgba(76,201,240,${(1-age)*0.9})`;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    // лёгкий изгиб дугой
+    const mx = (hx+x)/2, my = (hy+y)/2 - Math.abs(x-hx)*0.15;
+    ctx.moveTo(hx,hy); ctx.quadraticCurveTo(mx,my,x,y); ctx.stroke();
+    // точка цели
+    ctx.fillStyle = `rgba(76,201,240,${(1-age)*0.9})`;
+    ctx.beginPath(); ctx.arc(x,y,2.5,0,7); ctx.fill();
+  }
+  // сам хаб рисуем поверх
+  ctx.fillStyle = "#f4a261";
+  ctx.beginPath(); ctx.arc(hx,hy,4,0,7); ctx.fill();
+  ctx.strokeStyle = "#f4a26188"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(hx,hy,8,0,7); ctx.stroke();
+  requestAnimationFrame(drawMap);
+}
+
+// начальный снимок + карта
+fetch("/api/recent").then(r=>r.json()).then(d=>{
+  setCounts(d.counts);
+  d.events.slice().reverse().forEach(ev=>{
+    addRow(ev);
+  });
+  // наполним карту точками из истории
+  d.events.forEach(ev=>{
+    if(ev.type==="net" && ev.data && ev.data.lat != null){
+      arcs.push({lat:ev.data.lat, lon:ev.data.lon, t:performance.now(), daddr:ev.data.daddr});
+    }
+  });
+});
+resize();
 </script>
 </body>
 </html>

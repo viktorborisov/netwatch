@@ -2,6 +2,10 @@ FROM python:3.12-slim
 WORKDIR /app
 RUN pip install --no-cache-dir flask==3.0.3
 COPY app.py /app/app.py
-ENV EVENTS_FILE=/data/events.jsonl RING_SIZE=1000 RECENT_N=200
+COPY ipdb.py /app/ipdb.py
+# ipdb.bin (~25MB) — компактная IP->страна база (см. tools/build_ipdb.py).
+# Кладём в образ, чтобы не тянуть данные по сети на старте.
+COPY ipdb.bin /app/ipdb.bin
+ENV EVENTS_FILE=/data/events.jsonl IPDB_PATH=/app/ipdb.bin RING_SIZE=1000 RECENT_N=200
 EXPOSE 8000
 CMD ["python3", "/app/app.py"]
