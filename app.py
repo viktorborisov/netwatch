@@ -17,7 +17,8 @@ import os
 import time
 import threading
 from collections import deque, Counter
-from flask import Flask, Response, jsonify, render_template_string
+from flask import (Flask, Response, jsonify, render_template_string,
+                   send_from_directory)
 
 try:
     from ipdb import IPDB
@@ -140,9 +141,18 @@ def tail_loop():
             time.sleep(0.5)
 
 
+STATIC_DIR = os.environ.get("STATIC_DIR", "/app/static")
+
+
 @app.route("/")
 def index():
     return render_template_string(INDEX_HTML)
+
+
+@app.route("/static/<path:name>")
+def static_files(name):
+    """Отдаём Leaflet и world.geo.json из образа (без CDN)."""
+    return send_from_directory(STATIC_DIR, name)
 
 
 @app.route("/api/recent")
@@ -212,6 +222,7 @@ INDEX_HTML = r"""
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>netwatch — eBPF live</title>
+<link rel="stylesheet" href="/static/leaflet.css">
 <style>
   :root { --bg:#0b0f14; --panel:#111823; --line:#1e2a3a; --fg:#d7e2ee;
           --net:#4cc9f0; --proc:#f4a261; --file:#a06cd5; }
@@ -235,11 +246,13 @@ INDEX_HTML = r"""
          grid-template-rows:40vh 1fr; } }
   .mapbox { border-right:1px solid var(--line); position:relative;
             overflow:hidden; background:#070b10; }
-  #map { width:100%; height:100%; display:block; }
-  .maplegend { position:absolute; left:10px; bottom:10px; font-size:11px;
-               color:#7f93a8; background:rgba(11,15,20,.7); padding:6px 8px;
-               border:1px solid var(--line); border-radius:6px; }
+  #map { width:100%; height:100%; }
+  .maplegend { position:absolute; left:10px; bottom:10px; z-index:500;
+               font-size:11px; color:#7f93a8; background:rgba(11,15,20,.8);
+               padding:6px 8px; border:1px solid var(--line);
+               border-radius:6px; }
   .maplegend b { color:#4cc9f0; }
+  .leaflet-container { background:#070b10; }
   table { border-collapse:collapse; width:100%; }
   thead th { position:sticky; top:0; background:var(--panel);
              text-align:left; padding:7px 12px; border-bottom:1px solid var(--line);
@@ -266,7 +279,7 @@ INDEX_HTML = r"""
 </header>
 <main>
   <div class="mapbox">
-    <canvas id="map"></canvas>
+    <div id="map"></div>
     <div class="maplegend">карта коннектов · <b>линия</b> = куда стучится сервер ·
       точка-хаб = <b>RU</b> (сервер)</div>
   </div>
@@ -279,6 +292,7 @@ INDEX_HTML = r"""
   </table>
   </div>
 </main>
+<script src="/static/leaflet.js"></script>
 <script>
 const MAX = 300;
 const rows = document.getElementById("rows");
@@ -337,113 +351,111 @@ es.onmessage = (m)=>{
 es.onerror = ()=>{ /* EventSource сам переподключится */ };
 
 // ------------------------------------------------------------------
-// Карта мира на canvas: эквидистантная проекция lat/lon -> x/y.
-// Контуры материков — упрощённые полигоны (inline, без CDN).
-// Линии тянутся от хаба (координаты сервера) к целям коннектов.
+// Карта мира на Leaflet: контуры стран из world.geo.json (встроен
+// в образ), линии коннектов от хаба к странам-целям. Без CDN/тайлов.
 // ------------------------------------------------------------------
-const map = document.getElementById("map");
-const ctx = map.getContext("2d");
-const HUB = { lat:55.7, lon:37.6 };   // Москва (наш VPS, RU)
+const HUB = [55.7, 37.6];   // Москва (наш VPS, RU)
 
-// грубые контуры континентов (lon,lat пары), чтобы был ориентир
-const LAND = [
-  [[-168,66],[-140,70],[-100,72],[-80,70],[-60,58],[-70,45],[-80,25],[-97,17],[-105,20],[-118,32],[-127,40],[-125,50],[-140,60],[-168,66]], // N.America
-  [[-80,10],[-65,12],[-50,0],[-35,-8],[-40,-22],[-55,-35],[-70,-52],[-75,-45],[-72,-18],[-80,-5],[-80,10]], // S.America
-  [[-10,36],[0,44],[10,45],[28,45],[40,42],[50,45],[60,42],[70,38],[80,30],[90,22],[100,15],[110,10],[120,22],[130,32],[140,45],[160,60],[180,66],[160,70],[140,72],[100,76],[60,72],[30,70],[10,60],[-10,58],[-10,36]], // Eurasia
-  [[-17,15],[10,20],[30,15],[50,12],[42,-2],[40,-18],[32,-28],[20,-35],[10,-35],[0,-30],[-10,-10],[-17,15]], // Africa
-  [[113,-22],[125,-15],[140,-12],[150,-22],[153,-32],[146,-40],[135,-35],[120,-34],[113,-22]], // Australia
-  [[-45,60],[-20,66],[-25,75],[-40,82],[-60,80],[-50,70],[-45,60]] // Greenland-ish
-];
+const map = L.map("map", {
+  center: [30, 20], zoom: 1, minZoom: 1, maxZoom: 6,
+  worldCopyJump: true, attributionControl: false, zoomControl: true,
+  maxBounds: [[-85, -200], [85, 200]],
+});
+map.setView([25, 30], 1);
 
-let W=0, H=0, DPR=1;
-function resize(){
-  DPR = window.devicePixelRatio || 1;
-  const r = map.getBoundingClientRect();
-  W = r.width; H = r.height;
-  map.width = W*DPR; map.height = H*DPR;
-  ctx.setTransform(DPR,0,0,DPR,0,0);
-  drawMap();
-}
-window.addEventListener("resize", resize);
+// тусклый фон вместо тайлов
+L.rectangle([[-85, -180], [85, 180]],
+  { color: "#0d1620", weight: 0, fillColor: "#0b1119", fillOpacity: 1 }).addTo(map);
 
-// lon/lat -> экранные координаты
-function proj(lon, lat){
-  const x = (lon + 180) / 360 * W;
-  const y = (90 - lat) / 180 * H;
-  return [x, y];
-}
+// слой контуров стран
+const worldLayer = L.layerGroup().addTo(map);
+const arcsLayer = L.layerGroup().addTo(map);
+let geo = null;          // GeoJSON мира (загрузим один раз)
+let geoLoaded = false;
 
-// активные коннекты для анимации (гаснут со временем)
-let arcs = [];   // {lat,lon,t}
+fetch("/static/world.geo.json").then(r => r.json()).then(g => {
+  geo = g;
+  geoLoaded = true;
+  refreshCountries();
+}).catch(()=>{});
+
+// маркер хаба (сервер) — пульсирующая точка
+const hubMarker = L.circleMarker(HUB, {
+  radius: 6, color: "#f4a261", weight: 2,
+  fillColor: "#f4a261", fillOpacity: 0.9,
+}).addTo(map).bindTooltip("сервер (VPS, RU)");
+
+// активные коннекты (гаснут)
+let arcs = [];        // {lat,lon,t,line,dot}
+let countryHits = {}; // cc -> count (для подсветки)
+
 function addMapPoint(ev){
   const d = ev.data;
-  arcs.push({ lat:d.lat, lon:d.lon, t:performance.now(), daddr:d.daddr });
-  if(arcs.length > 60) arcs.shift();
-}
-
-function drawMap(){
-  if(!W) return;
-  // фон
-  ctx.clearRect(0,0,W,H);
-  ctx.fillStyle = "#070b10"; ctx.fillRect(0,0,W,H);
-  // сетка
-  ctx.strokeStyle = "#12202e"; ctx.lineWidth = 1;
-  for(let lon=-180; lon<=180; lon+=30){
-    const [x] = proj(lon,0); ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
-  }
-  for(let lat=-60; lat<=60; lat+=30){
-    const [,y] = proj(0,lat); ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
-  }
-  // материки
-  ctx.fillStyle = "#101c28"; ctx.strokeStyle = "#1e3346"; ctx.lineWidth = 1;
-  for(const poly of LAND){
-    ctx.beginPath();
-    poly.forEach(([lon,lat],i)=>{
-      const [x,y] = proj(lon,lat);
-      i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
-    });
-    ctx.closePath(); ctx.fill(); ctx.stroke();
-  }
-  // хаб (сервер)
-  const [hx,hy] = proj(HUB.lon, HUB.lat);
-  // линии коннектов
   const now = performance.now();
-  arcs = arcs.filter(a => now - a.t < 6000);
-  for(const a of arcs){
-    const [x,y] = proj(a.lon, a.lat);
-    const age = (now - a.t) / 6000;
-    ctx.strokeStyle = `rgba(76,201,240,${(1-age)*0.9})`;
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    // лёгкий изгиб дугой
-    const mx = (hx+x)/2, my = (hy+y)/2 - Math.abs(x-hx)*0.15;
-    ctx.moveTo(hx,hy); ctx.quadraticCurveTo(mx,my,x,y); ctx.stroke();
-    // точка цели
-    ctx.fillStyle = `rgba(76,201,240,${(1-age)*0.9})`;
-    ctx.beginPath(); ctx.arc(x,y,2.5,0,7); ctx.fill();
+  const line = L.polyline([HUB, [d.lat, d.lon]], {
+    color: "#4cc9f0", weight: 1.4, opacity: 0.9,
+  }).addTo(arcsLayer);
+  const dot = L.circleMarker([d.lat, d.lon], {
+    radius: 3, color: "#4cc9f0", weight: 1,
+    fillColor: "#4cc9f0", fillOpacity: 0.9,
+  }).addTo(arcsLayer).bindTooltip(
+      `${d.daddr}:${d.dport||""} · ${d.cc||"?"}`);
+  arcs.push({ t: now, line, dot });
+  if(arcs.length > 50) {
+    const old = arcs.shift();
+    arcsLayer.removeLayer(old.line); arcsLayer.removeLayer(old.dot);
   }
-  // сам хаб рисуем поверх
-  ctx.fillStyle = "#f4a261";
-  ctx.beginPath(); ctx.arc(hx,hy,4,0,7); ctx.fill();
-  ctx.strokeStyle = "#f4a26188"; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(hx,hy,8,0,7); ctx.stroke();
-  requestAnimationFrame(drawMap);
+  if(d.cc){ countryHits[d.cc] = (countryHits[d.cc]||0) + 1; }
 }
 
-// начальный снимок + карта
+// подкрашиваем страны по числу коннектов
+function refreshCountries(){
+  if(!geoLoaded || !geo) return;
+  worldLayer.clearLayers();
+  L.geoJSON(geo, {
+    style: (f) => {
+      const cc = f.properties && f.properties.id;
+      const hits = countryHits[cc] || 0;
+      if(hits > 0){
+        return { color: "#4cc9f0", weight: 1, fillColor: "#4cc9f0",
+                 fillOpacity: Math.min(0.15 + hits*0.06, 0.6) };
+      }
+      return { color: "#1e3346", weight: 0.6, fillColor: "#101c28",
+               fillOpacity: 1 };
+    },
+  }).addTo(worldLayer);
+}
+
+// плавное угасание линий
+function tick(){
+  const now = performance.now();
+  for(let i=arcs.length-1; i>=0; i--){
+    const a = arcs[i];
+    const age = (now - a.t) / 6000;
+    if(age >= 1){
+      arcsLayer.removeLayer(a.line); arcsLayer.removeLayer(a.dot);
+      arcs.splice(i,1);
+    } else {
+      a.line.setStyle({ opacity: (1-age)*0.9 });
+      a.dot.setStyle({ opacity: (1-age)*0.9 });
+    }
+  }
+  requestAnimationFrame(tick);
+}
+tick();
+
+// начальный снимок + карта + периодическая подсветка стран
 fetch("/api/recent").then(r=>r.json()).then(d=>{
   setCounts(d.counts);
-  d.events.slice().reverse().forEach(ev=>{
-    addRow(ev);
-  });
-  // наполним карту точками из истории
+  d.events.slice().reverse().forEach(ev=>addRow(ev));
   d.events.forEach(ev=>{
     if(ev.type==="net" && ev.data && ev.data.lat != null){
-      arcs.push({lat:ev.data.lat, lon:ev.data.lon, t:performance.now(), daddr:ev.data.daddr});
+      addMapPoint(ev);
     }
   });
+  refreshCountries();
 });
-resize();
+setInterval(refreshCountries, 3000);
 </script>
 </body>
 </html>
