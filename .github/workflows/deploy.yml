@@ -49,10 +49,13 @@ jobs:
       - name: Подготовить SSH-ключ
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          # пишем ключ через printf, чтобы гарантированно добавить \n в конец
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # чтобы ssh/rsync не спрашивали подтверждения отпечатка хоста
-          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          # отключаем проверку host key (rsync идёт с -o StrictHostKeyChecking=accept-new)
+          echo "Host *" > ~/.ssh/config
+          echo "  StrictHostKeyChecking accept-new" >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
       - name: Залить код на VPS (rsync)
         run: |
