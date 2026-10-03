@@ -1,0 +1,9 @@
+// proc.bt — запуск новых процессов.
+// comm-фильтр убирает сам tracer и его утилиты.
+// Формат: EXEC|nsecs|pid|comm|filename
+tracepoint:sched:sched_process_exec
+/comm != "bash" && comm != "tracer.sh" && comm != "date"
+ && comm != "bpftrace" && comm != "grep" && comm != "pgrep"/
+{
+    printf("EXEC|%llu|%d|%s|%s\n", nsecs, pid, comm, str(args->filename));
+}

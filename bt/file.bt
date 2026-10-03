@@ -1,0 +1,23 @@
+// file.bt — открытие "пользовательских" файлов (данных).
+// Отсекаем системный шум: /proc,/sys,/dev,/run,/lib,/usr/lib, locale.
+// Формат: OPEN|nsecs|pid|comm|filename
+tracepoint:syscalls:sys_enter_openat
+/comm != "bash" && comm != "tracer.sh" && comm != "date"
+ && comm != "bpftrace" && comm != "grep" && comm != "pgrep"/
+{
+    $f = str(args->filename);
+    if ($f != ""
+        && strncmp($f, "/proc", 5) != 0
+        && strncmp($f, "/sys", 4) != 0
+        && strncmp($f, "/dev", 4) != 0
+        && strncmp($f, "/run", 4) != 0
+        && strncmp($f, "/lib", 4) != 0
+        && strncmp($f, "/usr/lib", 8) != 0
+        && strncmp($f, "/usr/share/locale", 17) != 0
+        && strncmp($f, "/var/lib/hyperv", 15) != 0
+        && strncmp($f, "/etc/ld.so", 10) != 0
+        && strncmp($f, "/etc/localtime", 14) != 0)
+    {
+        printf("OPEN|%llu|%d|%s|%s\n", nsecs, pid, comm, $f);
+    }
+}

@@ -1,0 +1,6 @@
+logs/
+*.jsonl
+tracer.log
+__pycache__/
+*.pyc
+.venv/

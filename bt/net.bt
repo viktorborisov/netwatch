@@ -1,0 +1,9 @@
+// net.bt — исходящие TCP-соединения (TCP_SYN_SENT == 1).
+// nsecs — время в нс (bpftrace), чтобы не звать date из shell.
+// comm-фильтр убирает сам tracer и его утилиты (иначе лавина).
+// Формат: CONNECT|nsecs|pid|comm|daddr|dport
+tracepoint:sock:inet_sock_set_state
+/args->newstate == 1 && comm != "bash" && comm != "tracer.sh"/
+{
+    printf("CONNECT|%llu|%d|%s|%s|%d\n", nsecs, pid, comm, ntop(args->daddr), args->dport);
+}

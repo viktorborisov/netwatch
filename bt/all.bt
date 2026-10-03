@@ -1,0 +1,47 @@
+// all.bt — все три трейсера в ОДНОМ процессе bpftrace.
+// Экономия ~220MB RSS: bpftrace тащит libbpf/LLVM, и каждый
+// отдельный инстанс стоит ~112MB. На 868MB VPS это критично.
+//
+// Формат вывода (nsecs = время bpftrace, нс):
+//   CONNECT|nsecs|pid|comm|daddr|dport
+//   EXEC|nsecs|pid|comm|filename
+//   OPEN|nsecs|pid|comm|filename
+//
+// comm-фильтр везде убирает сам tracer и его утилиты (иначе лавина).
+
+// --- сеть: исходящие TCP-соединения (TCP_SYN_SENT == 1) ---
+tracepoint:sock:inet_sock_set_state
+/args->newstate == 1 && comm != "bash" && comm != "tracer.sh"/
+{
+    printf("CONNECT|%llu|%d|%s|%s|%d\n", nsecs, pid, comm, ntop(args->daddr), args->dport);
+}
+
+// --- процессы: запуск новых ---
+tracepoint:sched:sched_process_exec
+/comm != "bash" && comm != "tracer.sh" && comm != "date"
+ && comm != "bpftrace" && comm != "grep" && comm != "pgrep"/
+{
+    printf("EXEC|%llu|%d|%s|%s\n", nsecs, pid, comm, str(args->filename));
+}
+
+// --- файлы: открытие пользовательских файлов (данных) ---
+tracepoint:syscalls:sys_enter_openat
+/comm != "bash" && comm != "tracer.sh" && comm != "date"
+ && comm != "bpftrace" && comm != "grep" && comm != "pgrep"/
+{
+    $f = str(args->filename);
+    if ($f != ""
+        && strncmp($f, "/proc", 5) != 0
+        && strncmp($f, "/sys", 4) != 0
+        && strncmp($f, "/dev", 4) != 0
+        && strncmp($f, "/run", 4) != 0
+        && strncmp($f, "/lib", 4) != 0
+        && strncmp($f, "/usr/lib", 8) != 0
+        && strncmp($f, "/usr/share/locale", 17) != 0
+        && strncmp($f, "/var/lib/hyperv", 15) != 0
+        && strncmp($f, "/etc/ld.so", 10) != 0
+        && strncmp($f, "/etc/localtime", 14) != 0)
+    {
+        printf("OPEN|%llu|%d|%s|%s\n", nsecs, pid, comm, $f);
+    }
+}

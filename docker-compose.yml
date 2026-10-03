@@ -1,0 +1,17 @@
+services:
+  netwatch:
+    build: .
+    image: netwatch:latest
+    container_name: netwatch
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # наружу не торчим; доступ через SSH-туннель
+    volumes:
+      - ./logs:/data:ro          # события от host-bpftrace
+    environment:
+      EVENTS_FILE: /data/events.jsonl
+      RING_SIZE: "1000"
+      RECENT_N: "200"
+    mem_limit: 128m
+    memswap_limit: 192m
+    cpus: "0.5"
